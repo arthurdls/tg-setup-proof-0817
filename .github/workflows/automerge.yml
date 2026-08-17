@@ -94,27 +94,36 @@ jobs:
           # Queue present -> let the queue name the strategy. No queue -> name it.
           if [ -n "$queue" ]; then first=""; second="squash"; else first="squash"; second=""; fi
 
-          settled() {
-            grep -q '"enabledAt"' <<<"$1" && return 0
-            grep -qi 'already enabled\|is in clean status' <<<"$1"
+          # The mutation's own response is not evidence that anything is armed.
+          # Every arming failure so far reported success somewhere and left
+          # autoMergeRequest null, so read the field back independently.
+          armed_at() {
+            gh api graphql -f query='
+              query($id: ID!) {
+                node(id: $id) {
+                  ... on PullRequest { autoMergeRequest { enabledAt } }
+                }
+              }' -f id="$PR_ID" --jq '.data.node.autoMergeRequest.enabledAt // ""' 2>/dev/null || printf ''
           }
 
           response=$(arm "$first")
           printf '%s\n' "$response"
-          if settled "$response"; then
-            echo "auto-merge armed for #$PR_NUMBER"
+          enabled=$(armed_at)
+          if [ -z "$enabled" ]; then
+            # The repository disagreed about who owns the strategy; take the
+            # other branch of the same decision rather than leaving it unarmed.
+            echo "first arming form left autoMergeRequest null; trying the other" >&2
+            response=$(arm "$second")
+            printf '%s\n' "$response"
+            enabled=$(armed_at)
+          fi
+
+          if [ -n "$enabled" ]; then
+            echo "auto-merge armed for #$PR_NUMBER; autoMergeRequest.enabledAt=$enabled"
             exit 0
           fi
 
-          # The repository disagreed about who owns the strategy; take the
-          # other branch of the same decision rather than leaving it unarmed.
-          echo "retrying with the other merge-strategy form" >&2
-          response=$(arm "$second")
-          printf '%s\n' "$response"
-          if settled "$response"; then
-            echo "auto-merge armed for #$PR_NUMBER"
-            exit 0
-          fi
-
-          echo "failed to arm auto-merge for #$PR_NUMBER" >&2
+          echo "failed to arm auto-merge for #$PR_NUMBER: autoMergeRequest is still null." >&2
+          echo "note: no gh pr merge form arms auto-merge on a queue-protected branch;" >&2
+          echo "note: enablePullRequestAutoMerge is the only mechanism that works." >&2
           exit 1
