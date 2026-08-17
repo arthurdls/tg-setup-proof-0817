@@ -1,0 +1,50 @@
+name: Arm auto-merge
+
+# A green pull request must enqueue itself. Arming auto-merge by hand is a step
+# a human forgets: on 2026-08-17 PRs #103, #104 and #105 were green at 05:23Z,
+# 05:36Z and 06:00Z and none carried autoMergeRequest, so all three sat until a
+# human batch-enqueued them at 06:05Z -- 41m56s, 29m18s and 5m06s of idle green.
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: arm-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_ID: ${{ github.event.pull_request.node_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          # No mergeMethod: when a merge queue owns the branch GitHub rejects a
+          # caller-supplied strategy ("The merge strategy for main is set by the
+          # merge queue"). The repository is squash-only, so the default is SQUASH.
+          response=$(gh api graphql -f query='
+            mutation($id: ID!) {
+              enablePullRequestAutoMerge(input: {pullRequestId: $id}) {
+                pullRequest { number autoMergeRequest { enabledAt } }
+              }
+            }' -f id="$PR_ID" 2>&1) || true
+          printf '%s\n' "$response"
+          if grep -qi 'already enabled\|is in clean status' <<<"$response"; then
+            echo "auto-merge already armed for #$PR_NUMBER"
+            exit 0
+          fi
+          if grep -q '"enabledAt"' <<<"$response"; then
+            echo "auto-merge armed for #$PR_NUMBER"
+            exit 0
+          fi
+          echo "failed to arm auto-merge for #$PR_NUMBER" >&2
+          exit 1
