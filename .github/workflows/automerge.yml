@@ -10,6 +10,7 @@ on:
     types: [opened, reopened, ready_for_review, synchronize]
 
 permissions:
+  administration: read
   contents: write
   pull-requests: write
 
@@ -32,6 +33,27 @@ jobs:
           REPO: ${{ github.event.repository.name }}
         run: |
           set -uo pipefail
+
+          # Arming a branch that gates nothing is worse than not arming it: with
+          # no required check, auto-merge degrades into an immediate merge, which
+          # is how a red pull request landed on main and cost a 2h33m recovery.
+          # Required checks live in two independent places -- classic branch
+          # protection and rulesets -- and neither view shows the other, so count
+          # both. Failing to read them is treated as "no gate": an unarmed PR is
+          # a delay, an armed one with no gate is a red merge.
+          classic=$(gh api "repos/$OWNER/$REPO/branches/$BASE_REF/protection/required_status_checks" \
+            --jq '[(.contexts // [])[], ((.checks // [])[] | .context)] | unique | length' 2>/dev/null) || classic=0
+          ruleset=$(gh api "repos/$OWNER/$REPO/rules/branches/$BASE_REF" \
+            --jq '[.[] | select(.type == "required_status_checks")
+                       | .parameters.required_status_checks[]? | .context] | unique | length' 2>/dev/null) || ruleset=0
+          [ -n "$classic" ] || classic=0
+          [ -n "$ruleset" ] || ruleset=0
+          if [ "$((classic + ruleset))" -eq 0 ]; then
+            echo "refusing to arm #$PR_NUMBER: $BASE_REF has no required status check," >&2
+            echo "so auto-merge would degrade into an immediate merge." >&2
+            exit 1
+          fi
+          echo "$BASE_REF gates on $classic classic + $ruleset ruleset required check(s)"
 
           # The arming call is strategy-sensitive in BOTH directions, and both
           # failures are silent no-ops that leave a green PR sitting:
