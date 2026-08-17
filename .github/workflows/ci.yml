@@ -18,3 +18,27 @@ jobs:
         with:
           go-version: stable
       - run: go test ./...
+
+  # This job has no `if:` and no `paths:` filter on purpose. A required check
+  # that skips reports no status, and a merge queue holds an entry forever
+  # waiting for a green signal that will never arrive. It runs on every event
+  # and always reports; only its body is conditional.
+  pr-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check pull request size
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_SIZE_ESCAPE_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "pr-size: not a pull request event; nothing to measure"
+            exit 0
+          fi
+          bash .github/scripts/check-pr-size.sh "$BASE_SHA" "$HEAD_SHA"
