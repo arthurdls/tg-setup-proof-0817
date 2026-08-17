@@ -10,7 +10,6 @@ on:
     types: [opened, reopened, ready_for_review, synchronize]
 
 permissions:
-  administration: read
   contents: write
   pull-requests: write
 
@@ -41,8 +40,11 @@ jobs:
           # protection and rulesets -- and neither view shows the other, so count
           # both. Failing to read them is treated as "no gate": an unarmed PR is
           # a delay, an armed one with no gate is a red merge.
-          classic=$(gh api "repos/$OWNER/$REPO/branches/$BASE_REF/protection/required_status_checks" \
-            --jq '[(.contexts // [])[], ((.checks // [])[] | .context)] | unique | length' 2>/dev/null) || classic=0
+          # The branch endpoint, not .../protection: GITHUB_TOKEN has push access
+          # but not admin, and the protection endpoint requires admin.
+          classic=$(gh api "repos/$OWNER/$REPO/branches/$BASE_REF" \
+            --jq '[(.protection.required_status_checks.contexts // [])[],
+                   ((.protection.required_status_checks.checks // [])[] | .context)] | unique | length' 2>/dev/null) || classic=0
           ruleset=$(gh api "repos/$OWNER/$REPO/rules/branches/$BASE_REF" \
             --jq '[.[] | select(.type == "required_status_checks")
                        | .parameters.required_status_checks[]? | .context] | unique | length' 2>/dev/null) || ruleset=0
