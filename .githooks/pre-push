@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote_name=${1:-origin}
+
+# A push may only update lane refs named in this repository's Git directory.
+# Keep this state local: FLEET_DIR and other ambient environment variables are
+# deliberately ignored.
+allowlist="$(git rev-parse --git-path touch-grass-allowed-push-refs)"
+if [[ ! -f "$allowlist" ]]; then
+  echo "pre-push: missing repository-local lane allowlist: $allowlist" >&2
+  exit 1
+fi
+
+# Being current with the integration branch is a precondition of pushing, so the
+# failure lands here -- where one merge fixes it -- instead of at merge time on
+# a pull request that has already been reviewed.
+integration_file="$(git rev-parse --git-path touch-grass-integration-ref)"
+integration_ref=refs/heads/main
+if [[ -f "$integration_file" ]]; then
+  integration_ref="$(head -n1 -- "$integration_file" | tr -d '[:space:]')"
+fi
+if [[ "$integration_ref" != refs/heads/* ]]; then
+  echo "pre-push: integration ref must be a fully-qualified branch ref: $integration_ref" >&2
+  exit 1
+fi
+
+is_allowed_ref() {
+  grep -Fqx -- "$1" "$allowlist"
+}
+
+# Read the integration tip from the remote being pushed to, not from a possibly
+# stale remote-tracking ref. A dedicated namespace keeps refs/remotes intact.
+integration_tip=
+if [[ -n "$(git ls-remote --heads -- "$remote_name" "${integration_ref#refs/heads/}" 2>/dev/null)" ]]; then
+  if ! git fetch --quiet -- "$remote_name" "+${integration_ref}:refs/touch-grass/integration" 2>/dev/null; then
+    echo "pre-push: cannot read $integration_ref from $remote_name" >&2
+    exit 1
+  fi
+  integration_tip="$(git rev-parse --verify --quiet refs/touch-grass/integration^{commit})" || {
+    echo "pre-push: $integration_ref on $remote_name does not resolve to a commit" >&2
+    exit 1
+  }
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -n "$local_ref" && -n "$local_sha" && -n "$remote_ref" && -n "$remote_sha" ]] || {
+    echo "pre-push: malformed ref update" >&2
+    exit 1
+  }
+
+  if ! is_allowed_ref "$remote_ref" || [[ "$local_ref" != "$remote_ref" ]]; then
+    echo "pre-push: refusing update outside this repository's lane scope: $remote_ref" >&2
+    exit 1
+  fi
+
+  current_sha="$(git rev-parse --verify "${local_ref}^{commit}" 2>/dev/null)" || {
+    echo "pre-push: local ref does not resolve to a commit: $local_ref" >&2
+    exit 1
+  }
+  if [[ "$local_sha" != "$current_sha" ]]; then
+    echo "pre-push: refusing stale update for $local_ref" >&2
+    exit 1
+  fi
+
+  if [[ -z "$integration_tip" ]]; then
+    # No absence claim without a positive control: say the check did not run.
+    echo "pre-push: $remote_name has no $integration_ref; integration-sync check skipped" >&2
+    continue
+  fi
+  if [[ "$local_ref" == "$integration_ref" ]]; then
+    continue
+  fi
+  if ! git merge-base --is-ancestor "$integration_tip" "$local_sha"; then
+    echo "pre-push: $local_ref is behind $integration_ref ($integration_tip)." >&2
+    echo "pre-push: merge it in -- never rebase a pushed branch, never force-push:" >&2
+    echo "pre-push:   git fetch $remote_name ${integration_ref#refs/heads/} && git merge FETCH_HEAD" >&2
+    exit 1
+  fi
+done
