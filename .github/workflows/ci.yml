@@ -1,7 +1,12 @@
 name: CI
 
 on:
+  # labeled/unlabeled are here because the size ceiling's escape hatch IS a
+  # label. Without them, applying the label never re-runs the check and the
+  # documented escape does nothing -- an escape hatch that does not work teaches
+  # people to invent workarounds instead.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   push:
     branches: [main]
